@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Claude Code Usage Relay Server.
 
-Reads JSONL logs from ~/.claude/projects/ and serves usage metrics
-over HTTP for the ESP32-C3 round display to consume.
+Fetches real-time utilization from Anthropic's OAuth usage API (same
+approach as TokenEater) and supplements with JSONL-derived detail data
+for the cost/token/model screens.
 
 Usage:
-    python server.py --port 8265 --plan pro
-    python server.py --plan max5 --host 0.0.0.0
+    python server.py                      # auto-detect plan, use OAuth API
+    python server.py --plan max5
+    python server.py --no-api             # JSONL-only fallback
 """
 
 import json
-import os
-import sys
+import subprocess
 import time
 import argparse
 from datetime import datetime, timezone, timedelta
@@ -19,14 +20,18 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
+SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 
-SESSION_WINDOW = timedelta(hours=5)
+SESSION_HOURS = 5
+WEEK_WINDOW = timedelta(days=7)
 
-# Per-session (5h window) limits by plan — empirical values from claude-monitor
+_DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+# Per-session limits by plan — empirical values from claude-monitor
 PLAN_LIMITS = {
-    "pro": {"tokens": 19_000, "cost": 18.0, "messages": 250},
-    "max5": {"tokens": 88_000, "cost": 35.0, "messages": 1_000},
-    "max20": {"tokens": 220_000, "cost": 140.0, "messages": 2_000},
+    "pro": {"cost": 18.0, "messages": 250, "tokens": 19_000},
+    "max5": {"cost": 35.0, "messages": 1_000, "tokens": 88_000},
+    "max20": {"cost": 140.0, "messages": 2_000, "tokens": 220_000},
 }
 
 # USD per million tokens
@@ -36,10 +41,163 @@ PRICING = {
     "haiku": {"input": 0.25, "output": 1.25, "cache_write": 0.3, "cache_read": 0.03},
 }
 
-# Simple in-memory cache
 _cache: dict = {"data": None, "expires": 0.0}
-CACHE_TTL = 5  # seconds
+CACHE_TTL = 5
 
+# ── OAuth / Anthropic Usage API ──
+
+USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
+USAGE_API_BETA = "oauth-2025-04-20"
+
+_token_cache: dict = {
+    "access_token": None, "expires_at": 0,
+    "subscription_type": None, "rate_limit_tier": None,
+}
+_usage_api_cache: dict = {"data": None, "expires": 0.0}
+USAGE_API_CACHE_TTL = 30
+
+_use_api: bool = True
+
+
+def get_oauth_credentials() -> dict:
+    """Read Claude Code OAuth credentials from macOS Keychain."""
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return {}
+        creds = json.loads(result.stdout.strip())
+        return creds.get("claudeAiOauth", {})
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return {}
+
+
+def get_access_token() -> str | None:
+    """Get a valid OAuth access token, re-reading Keychain when near expiry."""
+    now_ms = int(time.time() * 1000)
+
+    # Return cached token if still valid (60s buffer)
+    if (_token_cache["access_token"]
+            and _token_cache["expires_at"] > now_ms + 60_000):
+        return _token_cache["access_token"]
+
+    # Re-read from Keychain (Claude Code handles token refresh)
+    oauth = get_oauth_credentials()
+    if not oauth or not oauth.get("accessToken"):
+        return None
+
+    _token_cache["access_token"] = oauth["accessToken"]
+    _token_cache["expires_at"] = oauth.get("expiresAt", 0)
+    _token_cache["subscription_type"] = oauth.get("subscriptionType")
+    _token_cache["rate_limit_tier"] = oauth.get("rateLimitTier")
+    return _token_cache["access_token"]
+
+
+def fetch_usage_api() -> dict | None:
+    """Fetch utilization from Anthropic's OAuth usage API.
+
+    Uses curl subprocess to avoid Python SSL cert issues on macOS.
+    Returns raw API response dict or None. Uses 30s cache.
+    """
+    if not _use_api:
+        return None
+
+    now = time.monotonic()
+    if _usage_api_cache["data"] is not None and now < _usage_api_cache["expires"]:
+        return _usage_api_cache["data"]
+
+    token = get_access_token()
+    if not token:
+        return _usage_api_cache.get("data")  # stale is better than nothing
+
+    try:
+        result = subprocess.run(
+            [
+                "curl", "-s", "--max-time", "10",
+                "-H", f"Authorization: Bearer {token}",
+                "-H", f"anthropic-beta: {USAGE_API_BETA}",
+                USAGE_API_URL,
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip())
+        data = json.loads(result.stdout)
+        _usage_api_cache["data"] = data
+        _usage_api_cache["expires"] = now + USAGE_API_CACHE_TTL
+        return data
+    except Exception as e:
+        print(f"Usage API error: {e}")
+        return _usage_api_cache.get("data")
+
+
+def _format_reset_time(resets_at: str) -> str:
+    """Format ISO resets_at timestamp into human-friendly label."""
+    try:
+        reset_dt = datetime.fromisoformat(resets_at)
+        now = datetime.now(timezone.utc)
+        total_min = (reset_dt - now).total_seconds() / 60
+
+        if total_min <= 0:
+            return "now"
+        if total_min < 300:  # < 5 hours
+            h = int(total_min // 60)
+            m = int(total_min % 60)
+            return f"{h}h {m:02d}m" if h > 0 else f"{m}m"
+        return _DAY_NAMES[reset_dt.weekday()]
+    except (ValueError, TypeError):
+        return ""
+
+
+def build_utilization(api_data: dict | None) -> dict:
+    """Transform raw API response into clean utilization dict for the ESP."""
+    empty = {"pct": 0, "reset_label": ""}
+
+    if api_data is None:
+        return {"session": empty, "weekly": empty, "sonnet": empty}
+
+    result = {}
+    for key, api_key in [("session", "five_hour"), ("weekly", "seven_day"), ("sonnet", "seven_day_sonnet")]:
+        bucket = api_data.get(api_key)
+        if bucket:
+            result[key] = {
+                "pct": round(bucket.get("utilization", 0)),
+                "reset_label": _format_reset_time(bucket.get("resets_at", "")),
+            }
+        else:
+            result[key] = dict(empty)
+
+    return result
+
+
+# ── Plan detection ──
+
+def detect_plan() -> str:
+    """Auto-detect plan from OAuth token metadata, falling back to settings.json."""
+    oauth = get_oauth_credentials()
+    if oauth:
+        tier = (oauth.get("rateLimitTier") or "").lower()
+        sub = (oauth.get("subscriptionType") or "").lower()
+        if "max_20x" in tier:
+            return "max20"
+        if "max" in tier or "max" in sub:
+            return "max5"
+        if sub == "pro":
+            return "pro"
+
+    try:
+        with open(SETTINGS_FILE) as f:
+            settings = json.load(f)
+        if "opus" in settings.get("model", "").lower():
+            return "max5"
+    except (OSError, json.JSONDecodeError):
+        pass
+    return "pro"
+
+
+# ── JSONL parsing (for detail screens) ──
 
 def model_family(model_name: str) -> str:
     m = model_name.lower()
@@ -61,7 +219,7 @@ def compute_cost(model: str, inp: int, out: int, cw: int, cr: int) -> float:
 
 
 def parse_jsonl_files(cutoff: datetime) -> list[dict]:
-    """Parse JSONL log files and return assistant entries after cutoff."""
+    """Parse JSONL log files and return entries with non-zero tokens after cutoff."""
     entries = []
     seen: set[str] = set()
     cutoff_epoch = cutoff.timestamp()
@@ -114,21 +272,19 @@ def parse_jsonl_files(cutoff: datetime) -> list[dict]:
                     cw = usage.get("cache_creation_input_tokens", 0)
                     cr = usage.get("cache_read_input_tokens", 0)
 
+                    if not any([inp, out, cw, cr]):
+                        continue
+
                     cost = obj.get("costUSD")
                     if cost is None:
                         cost = compute_cost(model, inp, out, cw, cr)
 
-                    entries.append(
-                        {
-                            "ts": ts,
-                            "model": model,
-                            "input": inp,
-                            "output": out,
-                            "cache_write": cw,
-                            "cache_read": cr,
-                            "cost": float(cost),
-                        }
-                    )
+                    entries.append({
+                        "ts": ts, "model": model,
+                        "input": inp, "output": out,
+                        "cache_write": cw, "cache_read": cr,
+                        "cost": float(cost),
+                    })
         except (OSError, PermissionError):
             continue
 
@@ -136,37 +292,76 @@ def parse_jsonl_files(cutoff: datetime) -> list[dict]:
     return entries
 
 
+def _pct(used: float, limit: float) -> int:
+    if limit <= 0:
+        return 0
+    return min(100, round(used / limit * 100))
+
+
+def _find_active_session(entries: list[dict], now: datetime) -> tuple[list[dict], float]:
+    """Find the active session block (hour-rounded anchor + 5h)."""
+    ten_h_ago = now - timedelta(hours=10)
+    recent = [e for e in entries if e["ts"] >= ten_h_ago]
+    if not recent:
+        return [], SESSION_HOURS * 60
+
+    blocks: list[dict] = []
+    cur: dict | None = None
+
+    for entry in recent:
+        if cur is None or entry["ts"] > cur["end"]:
+            if cur is not None:
+                blocks.append(cur)
+            start = entry["ts"].replace(minute=0, second=0, microsecond=0)
+            end = start + timedelta(hours=SESSION_HOURS)
+            cur = {"start": start, "end": end, "entries": [entry]}
+        else:
+            cur["entries"].append(entry)
+
+    if cur is not None:
+        blocks.append(cur)
+
+    for block in reversed(blocks):
+        if block["end"] > now:
+            remaining = max(0.0, (block["end"] - now).total_seconds() / 60)
+            return block["entries"], remaining
+
+    return [], SESSION_HOURS * 60
+
+
+# ── Metrics computation ──
+
 def compute_metrics(plan_name: str) -> dict:
     now = datetime.now(timezone.utc)
     limits = PLAN_LIMITS.get(plan_name, PLAN_LIMITS["pro"])
 
-    session_cutoff = now - SESSION_WINDOW
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    cutoff = min(session_cutoff, day_start)
+    # Fetch utilization from Anthropic API (primary data for dashboard)
+    api_data = fetch_usage_api()
+    utilization = build_utilization(api_data)
 
+    # JSONL-derived data for detail screens
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff = min(now - timedelta(hours=10), day_start)
     entries = parse_jsonl_files(cutoff)
 
-    session = [e for e in entries if e["ts"] >= session_cutoff]
-    daily = [e for e in entries if e["ts"] >= day_start]
+    session, remaining = _find_active_session(entries, now)
 
-    # Session aggregates
     s_inp = sum(e["input"] for e in session)
     s_out = sum(e["output"] for e in session)
     s_cw = sum(e["cache_write"] for e in session)
     s_cr = sum(e["cache_read"] for e in session)
     s_cost = sum(e["cost"] for e in session)
-    s_total = s_inp + s_out + s_cw + s_cr
+    s_tokens_display = s_inp + s_out
 
-    # Burn rate
     burn_rate = 0.0
     cost_rate = 0.0
     if len(session) >= 2:
         dt_min = (session[-1]["ts"] - session[0]["ts"]).total_seconds() / 60
         if dt_min > 0:
-            burn_rate = s_total / dt_min
+            burn_rate = s_tokens_display / dt_min
             cost_rate = s_cost / dt_min
 
-    # Per-model
+    # Per-model (session)
     models: dict[str, dict] = {}
     for e in session:
         m = e["model"]
@@ -175,27 +370,20 @@ def compute_metrics(plan_name: str) -> dict:
         models[m]["input"] += e["input"]
         models[m]["output"] += e["output"]
         models[m]["cost"] += e["cost"]
-
-    # Round model costs
     for v in models.values():
         v["cost"] = round(v["cost"], 4)
 
-    # Session time remaining
-    if session:
-        session_end = session[0]["ts"] + SESSION_WINDOW
-        remaining = max(0.0, (session_end - now).total_seconds() / 60)
-    else:
-        remaining = SESSION_WINDOW.total_seconds() / 60
-
-    # Daily aggregates
+    # Daily
+    daily = [e for e in entries if e["ts"] >= day_start]
     d_cost = sum(e["cost"] for e in daily)
     d_tokens = sum(e["input"] + e["output"] + e["cache_write"] + e["cache_read"] for e in daily)
 
     return {
+        "utilization": utilization,
         "session": {
             "cost_usd": round(s_cost, 4),
             "cost_limit": limits["cost"],
-            "tokens_used": s_total,
+            "tokens_used": s_tokens_display,
             "token_limit": limits["tokens"],
             "messages_sent": len(session),
             "message_limit": limits["messages"],
@@ -228,11 +416,22 @@ def get_metrics_cached(plan_name: str) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    plan: str = "pro"
+    plan: str = "max5"
 
     def do_GET(self):
         if self.path == "/api/usage":
             data = get_metrics_cached(self.plan)
+            # Inject fresh local time (not cached — clock needs real-time)
+            local = datetime.now()
+            data["clock"] = {
+                "hour": local.hour,
+                "minute": local.minute,
+                "second": local.second,
+                "day": local.day,
+                "month": local.month,
+                "year": local.year,
+                "weekday": local.weekday(),
+            }
             body = json.dumps(data, default=str).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -248,24 +447,51 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def log_message(self, format, *args):
-        pass  # suppress default logging
+        pass
 
 
 def main():
+    global _use_api
+
     parser = argparse.ArgumentParser(description="Claude Usage Relay Server")
     parser.add_argument("--port", type=int, default=8265)
-    parser.add_argument("--plan", choices=list(PLAN_LIMITS.keys()), default="pro")
+    parser.add_argument(
+        "--plan", choices=list(PLAN_LIMITS.keys()) + ["auto"], default="auto",
+        help="Plan type (pro, max5, max20, auto). auto detects from OAuth/settings.",
+    )
     parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument(
+        "--no-api", action="store_true",
+        help="Disable Anthropic usage API; use JSONL only.",
+    )
     args = parser.parse_args()
 
-    Handler.plan = args.plan
+    _use_api = not args.no_api
+
+    plan = args.plan
+    if plan == "auto":
+        plan = detect_plan()
+        print(f"Auto-detected plan: {plan}")
+
+    Handler.plan = plan
+
+    # Test OAuth on startup
+    if _use_api:
+        token = get_access_token()
+        if token:
+            sub = _token_cache.get("subscription_type") or "unknown"
+            tier = _token_cache.get("rate_limit_tier") or "unknown"
+            print(f"  OAuth:         connected ({sub} / {tier})")
+        else:
+            print(f"  OAuth:         NOT FOUND (JSONL fallback)")
+            print(f"  Hint:          Ensure Claude Code is logged in")
 
     server = HTTPServer((args.host, args.port), Handler)
     print(f"Claude Usage Relay Server")
-    print(f"  Plan:     {args.plan}")
-    print(f"  Listen:   http://{args.host}:{args.port}")
-    print(f"  Endpoint: http://<your-ip>:{args.port}/api/usage")
-    print(f"  Logs:     {CLAUDE_DIR}")
+    print(f"  Plan:          {plan}")
+    print(f"  API:           {'enabled' if _use_api else 'disabled (JSONL only)'}")
+    print(f"  Listen:        http://{args.host}:{args.port}")
+    print(f"  Endpoint:      http://<your-ip>:{args.port}/api/usage")
     print()
 
     try:

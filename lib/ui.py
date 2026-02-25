@@ -1,49 +1,46 @@
 """UI screens for the round display.
 
-Three screens, navigated by touch (tap left=prev, tap right=next):
-  0: Cost gauge — session cost with segmented ring
-  1: Token & message details
-  2: Per-model breakdown
+Four screens, navigated by touch (tap left=prev, tap right=next):
+  0: Dashboard — session / weekly / sonnet utilization bars (from Anthropic API)
+  1: Clock — digital clock with date (NTP-synced)
+  2: Token breakdown with bars
+  3: Per-model cost breakdown
 
 Battery percentage is shown on every screen.
 """
 
-import math
 from micropython import const
 import lib.display as disp
 import lib.battery as battery
 from lib.colors import (
     BG, TEXT, TEXT_DIM, ACCENT, ACCENT_DIM,
-    GOOD, WARN, BAD, cost_color,
+    GOOD, WARN, BAD, BAR_FILL, BAR_BG,
 )
 
 # Loaded by main.py after display init
 font_lg = None  # vga1_bold_16x32 or vga1_16x32
 font_sm = None  # vga1_8x16
 
-NUM_SCREENS = 3
+NUM_SCREENS = 4
 _CX = const(120)
 _CY = const(120)
 
 
+# ── Formatters ──
+
 def _fmt_tokens(n):
-    """Format token count: 1234 -> '1,234', 1234567 -> '1.23M'."""
     if n >= 1_000_000:
         return "{:.2f}M".format(n / 1_000_000)
-    if n >= 10_000:
-        return "{:.1f}K".format(n / 1_000)
     if n >= 1_000:
         return "{:.1f}K".format(n / 1_000)
     return str(n)
 
 
 def _fmt_cost(c):
-    """Format cost as $X.XX."""
     return "${:.2f}".format(c)
 
 
 def _fmt_time(minutes):
-    """Format minutes as Xh Ym."""
     h = int(minutes // 60)
     m = int(minutes % 60)
     if h > 0:
@@ -51,47 +48,53 @@ def _fmt_time(minutes):
     return "{}m".format(m)
 
 
-def _pct(used, limit):
-    if limit <= 0:
-        return 0.0
-    return min(used / limit, 1.0)
+# ── Drawing primitives ──
+
+def _bar_color(pct):
+    """Color for progress bar fill based on percentage."""
+    if pct < 50:
+        return BAR_FILL
+    if pct < 80:
+        return WARN
+    return BAD
 
 
-def _draw_gauge(tft, fraction, color):
-    """Draw a segmented arc gauge around the display edge.
+def _draw_progress_bar(tft, x, y, w, h, pct):
+    """Draw a rounded progress bar with background."""
+    # Background
+    tft.fill_rect(x, y, w, h, BAR_BG)
+    # Fill
+    fill_w = int(w * min(pct / 100, 1.0))
+    if fill_w > 0:
+        tft.fill_rect(x, y, fill_w, h, _bar_color(pct))
 
-    36 segments spanning 270 degrees (from 7 o'clock to 5 o'clock).
-    """
-    r = 116
-    segments = 36
-    active = int(segments * min(max(fraction, 0), 1.0))
-    start_angle = 135  # degrees, 7 o'clock position
 
-    for i in range(segments):
-        angle = start_angle + (i * 270 / segments)
-        rad = math.radians(angle)
-        px = int(_CX + r * math.cos(rad))
-        py = int(_CY + r * math.sin(rad))
+def _draw_widget(tft, y, label, value_str, pct, subtitle):
+    """Draw a labeled progress bar widget."""
+    lx = 35
+    # Label
+    tft.text(font_sm, label, lx, y, TEXT)
+    # Value right-aligned
+    vw = len(value_str) * font_sm.WIDTH
+    tft.text(font_sm, value_str, 205 - vw, y, TEXT)
+    # Progress bar
+    _draw_progress_bar(tft, lx, y + 17, 170, 7, pct)
+    # Subtitle
+    tft.text(font_sm, subtitle, lx, y + 28, TEXT_DIM)
 
-        if i < active:
-            c = color
-        else:
-            c = 0x2104  # dark gray
-
-        tft.fill_rect(px - 2, py - 2, 5, 5, c)
 
 
 def _draw_dots(tft, current, total):
     """Draw page indicator dots at the bottom."""
-    dot_w = 8
-    gap = 6
+    dot_w = 6
+    gap = 5
     total_w = total * dot_w + (total - 1) * gap
     x = (_CX * 2 - total_w) // 2
-    y = 220
+    y = 222
 
     for i in range(total):
         c = ACCENT if i == current else 0x4208
-        tft.fill_rect(x + i * (dot_w + gap), y, dot_w, 4, c)
+        tft.fill_rect(x + i * (dot_w + gap), y, dot_w, 3, c)
 
 
 def _draw_battery(tft):
@@ -103,12 +106,10 @@ def _draw_battery(tft):
         color = WARN
     else:
         color = BAD
-    text = "{}%".format(pct)
-    # Position in top-right safe zone of the circle
-    x = 170
-    y = 22
-    tft.text(font_sm, text, x, y, color)
+    tft.text(font_sm, "{}%".format(pct), 170, 22, color)
 
+
+# ── Screen renderer ──
 
 def draw_screen(tft, screen_idx, data):
     """Render the specified screen with usage data."""
@@ -121,57 +122,113 @@ def draw_screen(tft, screen_idx, data):
         return
 
     if screen_idx == 0:
-        _draw_cost_screen(tft, data)
+        _draw_dashboard(tft, data)
     elif screen_idx == 1:
-        _draw_tokens_screen(tft, data)
+        _draw_clock_screen(tft, data)
     elif screen_idx == 2:
+        _draw_tokens_screen(tft, data)
+    elif screen_idx == 3:
         _draw_models_screen(tft, data)
 
     _draw_battery(tft)
     _draw_dots(tft, screen_idx, NUM_SCREENS)
 
 
-def _draw_cost_screen(tft, data):
-    """Screen 0: Session cost gauge."""
-    s = data.get("session", {})
-    cost = s.get("cost_usd", 0)
-    limit = s.get("cost_limit", 1)
-    tokens = s.get("tokens_used", 0)
-    msgs = s.get("messages_sent", 0)
-    msg_limit = s.get("message_limit", 1)
-    burn = s.get("burn_rate", 0)
-    remaining = s.get("minutes_remaining", 0)
+# ── Screen 0: Dashboard ──
 
-    frac = _pct(cost, limit)
-    color = cost_color(cost, limit)
+def _draw_dashboard(tft, data):
+    """Dashboard: Session / Weekly / Sonnet bars from Anthropic usage API."""
+    u = data.get("utilization", {})
 
-    # Gauge ring
-    _draw_gauge(tft, frac, color)
+    # Plan header
+    plan = data.get("plan", "")
+    plan_label = plan.upper() if plan else ""
+    disp.center_text(tft, font_sm, plan_label, 24, ACCENT)
 
-    # Label
-    disp.center_text(tft, font_sm, "SESSION", 38, ACCENT)
+    # Session bar (five_hour utilization)
+    sess = u.get("session", {})
+    s_pct = sess.get("pct", 0)
+    s_reset = sess.get("reset_label", "")
+    _draw_widget(
+        tft, 46,
+        "Session",
+        "{}%".format(s_pct),
+        s_pct,
+        "Resets {}".format(s_reset) if s_reset else "",
+    )
 
-    # Big cost
-    cost_str = _fmt_cost(cost)
-    disp.center_text(tft, font_lg, cost_str, 68, color)
+    # Separator
+    tft.fill_rect(50, 92, 140, 1, 0x3186)
 
-    # Limit
-    limit_str = "/ " + _fmt_cost(limit)
-    disp.center_text(tft, font_sm, limit_str, 102, TEXT_DIM)
+    # Weekly bar (seven_day utilization)
+    week = u.get("weekly", {})
+    w_pct = week.get("pct", 0)
+    w_reset = week.get("reset_label", "")
+    _draw_widget(
+        tft, 100,
+        "Weekly",
+        "{}%".format(w_pct),
+        w_pct,
+        "Resets {}".format(w_reset) if w_reset else "",
+    )
 
-    # Stats
-    y = 128
-    disp.center_text(tft, font_sm, _fmt_tokens(tokens) + " tokens", y, TEXT)
-    y += 18
-    disp.center_text(tft, font_sm, "{}/{} msgs".format(msgs, msg_limit), y, TEXT)
-    y += 18
-    disp.center_text(tft, font_sm, "{:.0f} tok/min".format(burn), y, TEXT_DIM)
-    y += 18
-    disp.center_text(tft, font_sm, _fmt_time(remaining) + " left", y, TEXT_DIM)
+    # Separator
+    tft.fill_rect(50, 146, 140, 1, 0x3186)
 
+    # Sonnet bar (seven_day_sonnet utilization)
+    son = u.get("sonnet", {})
+    sn_pct = son.get("pct", 0)
+    sn_reset = son.get("reset_label", "")
+    _draw_widget(
+        tft, 154,
+        "Sonnet",
+        "{}%".format(sn_pct),
+        sn_pct,
+        "Resets {}".format(sn_reset) if sn_reset else "",
+    )
+
+
+# ── Screen 1: Clock ──
+
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_MONTHS = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _draw_clock_screen(tft, data):
+    """Digital clock with date, pulled from relay server's system time."""
+    c = data.get("clock", {})
+    if not c:
+        disp.center_text(tft, font_sm, "No clock data", 110, TEXT_DIM)
+        return
+
+    hour = c.get("hour", 0)
+    minute = c.get("minute", 0)
+    day = c.get("day", 1)
+    month = c.get("month", 1)
+    year = c.get("year", 2026)
+    weekday = c.get("weekday", 0)
+
+    # Time — large centered
+    time_str = "{:02d}:{:02d}".format(hour, minute)
+    disp.center_text(tft, font_lg, time_str, 88, TEXT)
+
+    # Date — below time
+    date_str = "{} {} {}, {}".format(
+        _WEEKDAYS[weekday], _MONTHS[month], day, year
+    )
+    disp.center_text(tft, font_sm, date_str, 130, TEXT_DIM)
+
+    # Daily cost summary
+    d = data.get("daily", {})
+    d_cost = d.get("cost_usd", 0)
+    if d_cost > 0:
+        disp.center_text(tft, font_sm, "Today: " + _fmt_cost(d_cost), 165, ACCENT)
+
+
+# ── Screen 2: Token Breakdown ──
 
 def _draw_tokens_screen(tft, data):
-    """Screen 1: Token breakdown with bars."""
     s = data.get("session", {})
 
     disp.center_text(tft, font_sm, "TOKENS", 38, ACCENT)
@@ -183,42 +240,30 @@ def _draw_tokens_screen(tft, data):
         ("Cache R", s.get("cache_read_tokens", 0)),
     ]
 
-    # Find max for bar scaling
     max_val = max((v for _, v in items), default=1)
     if max_val == 0:
         max_val = 1
 
-    bar_x = 30
-    bar_max_w = 120
-    label_x = 30
-    value_x = 160
     y = 62
-
     for label, val in items:
-        tft.text(font_sm, label, label_x, y, TEXT_DIM)
-        # Bar
+        tft.text(font_sm, label, 30, y, TEXT_DIM)
         bar_y = y + 16
         frac = val / max_val
         bar_color = ACCENT if val > 0 else 0x2104
-        disp.draw_hbar(tft, bar_x, bar_y, bar_max_w, frac, 6, bar_color)
-        # Value
-        tft.text(font_sm, _fmt_tokens(val), value_x, y, TEXT)
+        disp.draw_hbar(tft, 30, bar_y, 120, frac, 6, bar_color)
+        tft.text(font_sm, _fmt_tokens(val), 160, y, TEXT)
         y += 32
 
-    # Daily summary
     d = data.get("daily", {})
     y += 4
-    tft.fill_rect(40, y, 160, 1, 0x4208)  # separator
+    tft.fill_rect(40, y, 160, 1, 0x4208)
     y += 8
-    disp.center_text(
-        tft, font_sm,
-        "Today: " + _fmt_cost(d.get("cost_usd", 0)),
-        y, ACCENT,
-    )
+    disp.center_text(tft, font_sm, "Today: " + _fmt_cost(d.get("cost_usd", 0)), y, ACCENT)
 
+
+# ── Screen 3: Models ──
 
 def _draw_models_screen(tft, data):
-    """Screen 2: Per-model cost breakdown."""
     models = data.get("models", {})
 
     disp.center_text(tft, font_sm, "MODELS", 38, ACCENT)
@@ -228,26 +273,20 @@ def _draw_models_screen(tft, data):
         return
 
     y = 62
-    label_x = 24
-    cost_x = 150
-
-    # Sort by cost descending
     sorted_models = sorted(models.items(), key=lambda kv: kv[1]["cost"], reverse=True)
 
-    for name, stats in sorted_models[:5]:  # max 5 models
+    for name, stats in sorted_models[:5]:
         short = _shorten_model(name)
-        tft.text(font_sm, short, label_x, y, TEXT)
-        tft.text(font_sm, _fmt_cost(stats["cost"]), cost_x, y, ACCENT)
-        # Token count below
+        tft.text(font_sm, short, 24, y, TEXT)
+        tft.text(font_sm, _fmt_cost(stats["cost"]), 150, y, ACCENT)
         y += 16
         tok_str = "  i:{} o:{}".format(
             _fmt_tokens(stats.get("input", 0)),
             _fmt_tokens(stats.get("output", 0)),
         )
-        tft.text(font_sm, tok_str, label_x, y, TEXT_DIM)
+        tft.text(font_sm, tok_str, 24, y, TEXT_DIM)
         y += 22
 
-    # Total
     total_cost = sum(m["cost"] for m in models.values())
     y = max(y + 4, 185)
     tft.fill_rect(40, y, 160, 1, 0x4208)
