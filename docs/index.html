@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude Usage Display</title>
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --bg2: #111;
+      --border: #222;
+      --text: #e8e8e8;
+      --dim: #888;
+      --accent: #fd8c00;
+      --accent2: #ffb347;
+      --code-bg: #161616;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.6;
+    }
+
+    /* ── Header ── */
+    header {
+      text-align: center;
+      padding: 72px 24px 48px;
+      border-bottom: 1px solid var(--border);
+    }
+    .badge {
+      display: inline-block;
+      background: #1a1a1a;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      padding: 3px 10px;
+      border-radius: 999px;
+      margin-bottom: 20px;
+    }
+    header h1 {
+      font-size: clamp(28px, 5vw, 48px);
+      font-weight: 700;
+      letter-spacing: -.02em;
+      line-height: 1.1;
+      margin-bottom: 16px;
+    }
+    header h1 span { color: var(--accent); }
+    header p {
+      color: var(--dim);
+      font-size: 17px;
+      max-width: 520px;
+      margin: 0 auto 32px;
+    }
+    .cta {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--accent);
+      color: #000;
+      font-weight: 600;
+      font-size: 14px;
+      padding: 10px 22px;
+      border-radius: 8px;
+      text-decoration: none;
+      transition: opacity .15s;
+    }
+    .cta:hover { opacity: .85; }
+
+    /* ── Screens ── */
+    .screens-section {
+      padding: 64px 24px;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .section-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 12px;
+    }
+    .screens-section h2 {
+      font-size: 26px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .screens-section > p {
+      color: var(--dim);
+      margin-bottom: 48px;
+      font-size: 15px;
+    }
+    .screens-grid {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 28px;
+    }
+    .screen-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+    }
+    .screen-card img {
+      width: 180px;
+      height: 180px;
+      border-radius: 50%;
+      box-shadow: 0 0 0 1px #333, 0 12px 40px rgba(0,0,0,.6);
+      display: block;
+    }
+    .screen-card .label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .screen-card .desc {
+      font-size: 12px;
+      color: var(--dim);
+      max-width: 160px;
+      text-align: center;
+    }
+
+    /* ── Features ── */
+    .features-section {
+      padding: 64px 24px;
+      border-bottom: 1px solid var(--border);
+    }
+    .features-section h2 {
+      text-align: center;
+      font-size: 26px;
+      font-weight: 700;
+      margin-bottom: 40px;
+    }
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 20px;
+      max-width: 860px;
+      margin: 0 auto;
+    }
+    .feature {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+    }
+    .feature-icon {
+      font-size: 24px;
+      margin-bottom: 12px;
+    }
+    .feature h3 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .feature p {
+      font-size: 13px;
+      color: var(--dim);
+    }
+
+    /* ── Setup ── */
+    .setup-section {
+      padding: 64px 24px;
+      border-bottom: 1px solid var(--border);
+    }
+    .setup-section h2 {
+      text-align: center;
+      font-size: 26px;
+      font-weight: 700;
+      margin-bottom: 40px;
+    }
+    .steps {
+      max-width: 640px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .step {
+      display: flex;
+      gap: 16px;
+    }
+    .step-num {
+      flex-shrink: 0;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #000;
+      font-size: 13px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 1px;
+    }
+    .step-body h3 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .step-body p { font-size: 13px; color: var(--dim); }
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-top: 10px;
+      overflow-x: auto;
+    }
+    code { font-family: "SF Mono", Menlo, monospace; font-size: 12px; color: #ccc; }
+
+    /* ── Hardware ── */
+    .hw-section {
+      padding: 64px 24px;
+      border-bottom: 1px solid var(--border);
+      text-align: center;
+    }
+    .hw-section h2 {
+      font-size: 26px;
+      font-weight: 700;
+      margin-bottom: 40px;
+    }
+    .hw-cards {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 20px;
+      max-width: 600px;
+      margin: 0 auto;
+    }
+    .hw-card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px 32px;
+      text-align: left;
+      min-width: 220px;
+    }
+    .hw-card .hw-name { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+    .hw-card .hw-desc { font-size: 12px; color: var(--dim); }
+
+    /* ── Footer ── */
+    footer {
+      padding: 32px 24px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--dim);
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="badge">MicroPython · ESP32C3 · GC9A01</div>
+  <h1>Claude <span>Usage</span> Display</h1>
+  <p>Real-time Claude Code usage metrics on a tiny round touchscreen — always visible on your desk.</p>
+  <a class="cta" href="https://github.com/ashoksahoo/claude-usage">View on GitHub</a>
+</header>
+
+<section class="screens-section">
+  <div class="section-label">4 screens · touch to navigate</div>
+  <h2>Everything at a glance</h2>
+  <p>Tap left or right half of the display to switch screens.</p>
+  <div class="screens-grid">
+    <div class="screen-card">
+      <img src="screen0_dashboard.png" alt="Dashboard screen" />
+      <div class="label">Dashboard</div>
+      <div class="desc">Session, weekly &amp; Sonnet utilization with reset countdowns</div>
+    </div>
+    <div class="screen-card">
+      <img src="screen1_clock.png" alt="Clock screen" />
+      <div class="label">Clock</div>
+      <div class="desc">Digital clock, date, daily cost &amp; battery voltage</div>
+    </div>
+    <div class="screen-card">
+      <img src="screen2_tokens.png" alt="Tokens screen" />
+      <div class="label">Tokens</div>
+      <div class="desc">Input, output, cache-write &amp; cache-read token bars</div>
+    </div>
+    <div class="screen-card">
+      <img src="screen3_models.png" alt="Models screen" />
+      <div class="label">Models</div>
+      <div class="desc">Per-model cost &amp; token breakdown sorted by spend</div>
+    </div>
+  </div>
+</section>
+
+<section class="features-section">
+  <h2>How it works</h2>
+  <div class="features-grid">
+    <div class="feature">
+      <div class="feature-icon">📄</div>
+      <h3>Reads JSONL logs</h3>
+      <p>Relay server parses Claude Code's <code>~/.claude/projects/**/*.jsonl</code> files in real time.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">📡</div>
+      <h3>Live API utilization</h3>
+      <p>Fetches session &amp; weekly percentages from Anthropic's OAuth usage API using your Keychain credentials.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">📶</div>
+      <h3>WiFi polling</h3>
+      <p>ESP32C3 polls the relay server every 10 seconds over your local WiFi network.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">🔋</div>
+      <h3>Battery powered</h3>
+      <p>Round Display has built-in LiPo charging — sits untethered on your desk.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">🎨</div>
+      <h3>Color coding</h3>
+      <p>Green under 50%, yellow 50–80%, red above 80% — know your budget at a glance.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">👆</div>
+      <h3>Touch navigation</h3>
+      <p>Capacitive touch screen — tap left half for previous screen, right half for next.</p>
+    </div>
+  </div>
+</section>
+
+<section class="hw-section">
+  <h2>Hardware</h2>
+  <div class="hw-cards">
+    <div class="hw-card">
+      <div class="hw-name">Seeed XIAO ESP32C3</div>
+      <div class="hw-desc">RISC-V · WiFi · 4MB flash · tiny form factor</div>
+    </div>
+    <div class="hw-card">
+      <div class="hw-name">Seeed Round Display for XIAO</div>
+      <div class="hw-desc">240×240 GC9A01 TFT · capacitive touch · RTC · LiPo charging</div>
+    </div>
+  </div>
+  <p style="margin-top:20px;font-size:13px;color:var(--dim)">Plugs together — no soldering or wiring needed.</p>
+</section>
+
+<section class="setup-section">
+  <h2>Quick setup</h2>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <h3>Flash firmware</h3>
+        <p>Download gc9a01_mpy for ESP32_GENERIC_C3, then flash:</p>
+        <pre><code>./tools/flash.sh firmware_4MiB.bin</code></pre>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <h3>Configure WiFi + server IP</h3>
+        <pre><code>cp config_example.py config.py
+# edit WIFI_SSID, WIFI_PASS, SERVER_URL</code></pre>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <h3>Upload to device</h3>
+        <pre><code>./tools/upload.sh</code></pre>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <h3>Start the relay server</h3>
+        <pre><code>python server/server.py</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  MIT License ·
+  <a href="https://github.com/ashoksahoo/claude-usage">GitHub</a> ·
+  Inspired by <a href="https://github.com/AThevon/TokenEater">TokenEater</a>
+</footer>
+
+</body>
+</html>
