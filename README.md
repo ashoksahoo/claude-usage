@@ -29,12 +29,12 @@ The **relay server** fetches real-time utilization percentages from Anthropic's 
 
 ## UI Screens
 
-Tap left/right halves of the screen to navigate. Battery percentage shown on all screens.
+Tap left/right halves of the screen to navigate.
 
 | Screen | Shows |
 |--------|-------|
 | **Dashboard** | Session, Weekly, and Sonnet utilization bars with reset countdowns |
-| **Clock** | Digital clock with date (from server system time), daily cost |
+| **Clock** | Digital clock with date, daily cost, battery + voltage |
 | **Tokens** | Bar chart of input/output/cache tokens |
 | **Models** | Per-model cost and token breakdown |
 
@@ -107,6 +107,7 @@ WiFi TX power is reduced to 13dBm (from default 20dBm) to cut peak current draw 
 ## Inspired By
 
 - [TokenEater](https://github.com/AThevon/TokenEater) — macOS menu bar app for Claude Code usage (utilization data approach)
+- [ccusage](https://github.com/ryoppippi/ccusage) — CLI tool for Claude Code usage analytics (token/cost calculation logic)
 - [claude-monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor) — terminal-based Claude Code usage monitor
 
 ## License

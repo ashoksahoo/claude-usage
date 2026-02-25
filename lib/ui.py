@@ -2,11 +2,9 @@
 
 Four screens, navigated by touch (tap left=prev, tap right=next):
   0: Dashboard — session / weekly / sonnet utilization bars (from Anthropic API)
-  1: Clock — digital clock with date (NTP-synced)
+  1: Clock — digital clock with date, battery + voltage
   2: Token breakdown with bars
   3: Per-model cost breakdown
-
-Battery percentage is shown on every screen.
 """
 
 from micropython import const
@@ -97,18 +95,6 @@ def _draw_dots(tft, current, total):
         tft.fill_rect(x + i * (dot_w + gap), y, dot_w, 3, c)
 
 
-def _draw_battery(tft):
-    """Draw battery percentage in the top-right area."""
-    pct = battery.percent()
-    if pct > 60:
-        color = GOOD
-    elif pct > 20:
-        color = WARN
-    else:
-        color = BAD
-    tft.text(font_sm, "{}%".format(pct), 170, 22, color)
-
-
 # ── Screen renderer ──
 
 def draw_screen(tft, screen_idx, data):
@@ -117,7 +103,6 @@ def draw_screen(tft, screen_idx, data):
 
     if data is None:
         disp.center_text(tft, font_sm, "No Data", 108, TEXT_DIM)
-        _draw_battery(tft)
         _draw_dots(tft, screen_idx, NUM_SCREENS)
         return
 
@@ -130,7 +115,6 @@ def draw_screen(tft, screen_idx, data):
     elif screen_idx == 3:
         _draw_models_screen(tft, data)
 
-    _draw_battery(tft)
     _draw_dots(tft, screen_idx, NUM_SCREENS)
 
 
@@ -223,7 +207,19 @@ def _draw_clock_screen(tft, data):
     d = data.get("daily", {})
     d_cost = d.get("cost_usd", 0)
     if d_cost > 0:
-        disp.center_text(tft, font_sm, "Today: " + _fmt_cost(d_cost), 165, ACCENT)
+        disp.center_text(tft, font_sm, "Today: " + _fmt_cost(d_cost), 158, ACCENT)
+
+    # Battery + voltage centered
+    pct = battery.percent()
+    volts = battery.voltage()
+    if pct > 60:
+        batt_color = GOOD
+    elif pct > 20:
+        batt_color = WARN
+    else:
+        batt_color = BAD
+    batt_str = "{}%  {:.2f}V".format(pct, volts)
+    disp.center_text(tft, font_sm, batt_str, 190, batt_color)
 
 
 # ── Screen 2: Token Breakdown ──

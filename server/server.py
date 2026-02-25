@@ -34,11 +34,12 @@ PLAN_LIMITS = {
     "max20": {"cost": 140.0, "messages": 2_000, "tokens": 220_000},
 }
 
-# USD per million tokens
+# USD per million tokens (from LiteLLM, matching ccusage)
 PRICING = {
-    "opus": {"input": 15.0, "output": 75.0, "cache_write": 18.75, "cache_read": 1.5},
-    "sonnet": {"input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.3},
-    "haiku": {"input": 0.25, "output": 1.25, "cache_write": 0.3, "cache_read": 0.03},
+    "opus-4":   {"input": 15.0, "output": 75.0,  "cache_write": 18.75, "cache_read": 1.5},
+    "opus-4-6": {"input": 5.0,  "output": 25.0,  "cache_write": 6.25,  "cache_read": 0.5},
+    "sonnet":   {"input": 3.0,  "output": 15.0,  "cache_write": 3.75,  "cache_read": 0.3},
+    "haiku":    {"input": 0.25, "output": 1.25,   "cache_write": 0.3,   "cache_read": 0.03},
 }
 
 _cache: dict = {"data": None, "expires": 0.0}
@@ -201,14 +202,18 @@ def detect_plan() -> str:
 
 def model_family(model_name: str) -> str:
     m = model_name.lower()
+    # Distinguish opus-4-6 (cheaper) from opus-4 (original)
+    if "opus-4-6" in m or "opus-4.6" in m:
+        return "opus-4-6"
     if "opus" in m:
-        return "opus"
+        return "opus-4"
     if "haiku" in m:
         return "haiku"
     return "sonnet"
 
 
 def compute_cost(model: str, inp: int, out: int, cw: int, cr: int) -> float:
+    """Compute cost from tokens using per-model pricing (fallback when costUSD missing)."""
     p = PRICING.get(model_family(model), PRICING["sonnet"])
     return (
         inp * p["input"] / 1_000_000
@@ -219,7 +224,13 @@ def compute_cost(model: str, inp: int, out: int, cw: int, cr: int) -> float:
 
 
 def parse_jsonl_files(cutoff: datetime) -> list[dict]:
-    """Parse JSONL log files and return entries with non-zero tokens after cutoff."""
+    """Parse JSONL log files matching ccusage's approach.
+
+    Key differences from earlier versions:
+      - No type=="assistant" filter (ccusage accepts any entry with usage data)
+      - Dedup on message.id:requestId pairs (ccusage style)
+      - Prefer costUSD from JSONL, fall back to computed cost
+    """
     entries = []
     seen: set[str] = set()
     cutoff_epoch = cutoff.timestamp()
@@ -245,14 +256,29 @@ def parse_jsonl_files(cutoff: datetime) -> list[dict]:
                     except json.JSONDecodeError:
                         continue
 
-                    if obj.get("type") != "assistant":
+                    msg = obj.get("message") or {}
+                    usage = msg.get("usage") or {}
+
+                    # Must have token data
+                    inp = usage.get("input_tokens")
+                    out = usage.get("output_tokens")
+                    if inp is None or out is None:
                         continue
 
-                    msg = obj.get("message") or {}
-                    msg_id = msg.get("id", "")
-                    if not msg_id or msg_id in seen:
+                    cw = usage.get("cache_creation_input_tokens", 0)
+                    cr = usage.get("cache_read_input_tokens", 0)
+
+                    if not any([inp, out, cw, cr]):
                         continue
-                    seen.add(msg_id)
+
+                    # Dedup: message.id + requestId (matches ccusage)
+                    msg_id = msg.get("id")
+                    req_id = obj.get("requestId")
+                    if msg_id and req_id:
+                        dedup_key = f"{msg_id}:{req_id}"
+                        if dedup_key in seen:
+                            continue
+                        seen.add(dedup_key)
 
                     ts_str = obj.get("timestamp", "")
                     if not ts_str:
@@ -265,16 +291,9 @@ def parse_jsonl_files(cutoff: datetime) -> list[dict]:
                     if ts < cutoff:
                         continue
 
-                    usage = msg.get("usage") or {}
                     model = msg.get("model", "unknown")
-                    inp = usage.get("input_tokens", 0)
-                    out = usage.get("output_tokens", 0)
-                    cw = usage.get("cache_creation_input_tokens", 0)
-                    cr = usage.get("cache_read_input_tokens", 0)
 
-                    if not any([inp, out, cw, cr]):
-                        continue
-
+                    # Prefer costUSD from JSONL (matches ccusage auto mode)
                     cost = obj.get("costUSD")
                     if cost is None:
                         cost = compute_cost(model, inp, out, cw, cr)
@@ -340,7 +359,10 @@ def compute_metrics(plan_name: str) -> dict:
     utilization = build_utilization(api_data)
 
     # JSONL-derived data for detail screens
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Use local timezone for day boundary (matches ccusage default)
+    local_now = datetime.now().astimezone()
+    day_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = day_start_local.astimezone(timezone.utc)
     cutoff = min(now - timedelta(hours=10), day_start)
     entries = parse_jsonl_files(cutoff)
 
@@ -361,22 +383,24 @@ def compute_metrics(plan_name: str) -> dict:
             burn_rate = s_tokens_display / dt_min
             cost_rate = s_cost / dt_min
 
-    # Per-model (session)
-    models: dict[str, dict] = {}
-    for e in session:
-        m = e["model"]
-        if m not in models:
-            models[m] = {"input": 0, "output": 0, "cost": 0.0}
-        models[m]["input"] += e["input"]
-        models[m]["output"] += e["output"]
-        models[m]["cost"] += e["cost"]
-    for v in models.values():
-        v["cost"] = round(v["cost"], 4)
-
     # Daily
     daily = [e for e in entries if e["ts"] >= day_start]
     d_cost = sum(e["cost"] for e in daily)
     d_tokens = sum(e["input"] + e["output"] + e["cache_write"] + e["cache_read"] for e in daily)
+
+    # Per-model (daily, matching ccusage)
+    models: dict[str, dict] = {}
+    for e in daily:
+        m = e["model"]
+        if m not in models:
+            models[m] = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "cost": 0.0}
+        models[m]["input"] += e["input"]
+        models[m]["output"] += e["output"]
+        models[m]["cache_write"] += e["cache_write"]
+        models[m]["cache_read"] += e["cache_read"]
+        models[m]["cost"] += e["cost"]
+    for v in models.values():
+        v["cost"] = round(v["cost"], 4)
 
     return {
         "utilization": utilization,
