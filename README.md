@@ -27,6 +27,15 @@ polls every 10s, renders UI
 
 The **relay server** fetches real-time utilization percentages from Anthropic's OAuth usage API (using your Claude Code credentials from macOS Keychain) and supplements with local JSONL log data for detail screens. The ESP32C3 fetches this over WiFi and renders it on the round display.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screen0_dashboard.png" width="180" alt="Dashboard"/>
+  <img src="docs/screen1_clock.png" width="180" alt="Clock"/>
+  <img src="docs/screen2_tokens.png" width="180" alt="Tokens"/>
+  <img src="docs/screen3_models.png" width="180" alt="Models"/>
+</p>
+
 ## UI Screens
 
 Tap left/right halves of the screen to navigate.
