@@ -13,11 +13,15 @@ Usage:
 
 import json
 import subprocess
+import sys
 import time
 import argparse
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from weather import get_weather
 
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
 SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
@@ -43,7 +47,7 @@ PRICING = {
 }
 
 _cache: dict = {"data": None, "expires": 0.0}
-CACHE_TTL = 5
+CACHE_TTL = 300  # 5 minutes
 
 # ── OAuth / Anthropic Usage API ──
 
@@ -151,19 +155,21 @@ def fetch_usage_api() -> dict | None:
 
 
 def _format_reset_time(resets_at: str) -> str:
-    """Format ISO resets_at timestamp into human-friendly label."""
+    """Format ISO resets_at timestamp — relative delta + local clock time."""
     try:
         reset_dt = datetime.fromisoformat(resets_at)
         now = datetime.now(timezone.utc)
         total_min = (reset_dt - now).total_seconds() / 60
+        local_time = reset_dt.astimezone().strftime("%H:%M")
 
         if total_min <= 0:
             return "now"
-        if total_min < 300:  # < 5 hours
+        if total_min < 300:  # < 5 hours — show delta + clock
             h = int(total_min // 60)
             m = int(total_min % 60)
-            return f"{h}h {m:02d}m" if h > 0 else f"{m}m"
-        return _DAY_NAMES[reset_dt.weekday()]
+            delta = f"{h}h{m:02d}m" if h > 0 else f"{m}m"
+            return f"{delta} @{local_time}"
+        return f"{_DAY_NAMES[reset_dt.weekday()]} @{local_time}"
     except (ValueError, TypeError):
         return ""
 
@@ -457,6 +463,7 @@ def get_metrics_cached(plan_name: str) -> dict:
 
 class Handler(BaseHTTPRequestHandler):
     plan: str = "max5"
+    location: str | None = None
 
     def do_GET(self):
         if self.path == "/api/usage":
@@ -472,9 +479,12 @@ class Handler(BaseHTTPRequestHandler):
                 "year": local.year,
                 "weekday": local.weekday(),
             }
+            # Weather is cached 2 hours inside get_weather()
+            data["weather"] = get_weather(self.location)
             body = json.dumps(data, default=str).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(body)
@@ -504,6 +514,10 @@ def main():
         "--no-api", action="store_true",
         help="Disable Anthropic usage API; use JSONL only.",
     )
+    parser.add_argument(
+        "--location", default=None, metavar="CITY",
+        help="City name for weather (e.g. 'London'). Auto-detected via GeoIP if omitted.",
+    )
     args = parser.parse_args()
 
     _use_api = not args.no_api
@@ -514,6 +528,7 @@ def main():
         print(f"Auto-detected plan: {plan}")
 
     Handler.plan = plan
+    Handler.location = args.location
 
     # Test OAuth on startup
     if _use_api:
@@ -526,10 +541,19 @@ def main():
             print(f"  OAuth:         NOT FOUND (JSONL fallback)")
             print(f"  Hint:          Ensure Claude Code is logged in")
 
-    server = HTTPServer((args.host, args.port), Handler)
+    # Pre-warm weather cache so first device request is instant
     print(f"Claude Usage Relay Server")
     print(f"  Plan:          {plan}")
     print(f"  API:           {'enabled' if _use_api else 'disabled (JSONL only)'}")
+    location_label = args.location if args.location else "auto (GeoIP)"
+    print(f"  Weather:       {location_label} (fetching...)", end="", flush=True)
+    wx = get_weather(args.location)
+    if wx.get("error"):
+        print(f" ERROR: {wx['error']}")
+    else:
+        print(f" {wx['temp_c']}C {wx['condition']} @ {wx['city']}")
+
+    server = HTTPServer((args.host, args.port), Handler)
     print(f"  Listen:        http://{args.host}:{args.port}")
     print(f"  Endpoint:      http://<your-ip>:{args.port}/api/usage")
     print()
