@@ -1,5 +1,7 @@
 # Claude Usage Display [WIP]
 
+[![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/ashoksahoo/claude-usage?utm_source=oss&utm_medium=github&utm_campaign=ashoksahoo%2Fclaude-usage&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)](https://coderabbit.ai)
+
 A smart display that shows your [Claude Code](https://claude.ai/code) usage in real time — built with MicroPython on a tiny round touchscreen.
 
 Inspired by [TokenEater](https://github.com/AThevon/TokenEater). Instead of a macOS menu bar widget, this puts the same data on a physical display you can glance at on your desk.
