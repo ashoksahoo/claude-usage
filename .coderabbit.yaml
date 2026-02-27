@@ -1,0 +1,34 @@
+# CodeRabbit configuration for claude-usage
+# MicroPython project: ESP32-C3 + GC9A01 round display + relay server
+language: "en-US"
+
+reviews:
+  profile: "chill"
+  high_level_summary: true
+  request_changes_workflow: false
+  auto_review:
+    enabled: true
+    drafts: false
+    ignore_title_keywords: ["wip", "WIP"]
+
+  # Skip generated/vendored files
+  path_filters:
+    - "!fonts/**"
+    - "!tools/**"
+
+  path_instructions:
+    - path: "lib/**/*.py"
+      instructions: |
+        MicroPython on ESP32-C3 (~100KB free RAM). Point out obvious memory
+        issues (e.g. string concat in a loop) or use of CPython-only modules
+        not available in MicroPython. Keep suggestions friendly — this is a
+        hobby project, not production code.
+
+    - path: "server/**/*.py"
+      instructions: |
+        Simple relay server, stdlib-only by design. Mention if a new
+        third-party import sneaks in, or if credentials could accidentally
+        get hardcoded. Otherwise keep feedback light.
+
+chat:
+  auto_reply: true

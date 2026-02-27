@@ -1,35 +1,28 @@
 """Claude Usage Display — main entry point.
 
-Shows Claude Code session usage metrics on the Seeed Round Display
-(GC9A01 240x240) connected to a Seeed XIAO ESP32C3.
-
-Requires:
-  - gc9a01_mpy firmware (russhughes) flashed to the device
-  - Relay server running on dev machine (server/server.py)
-  - config.py with WiFi and server settings
-  - Font files in /fonts/ on the device
+Uses uasyncio so touch polling (20ms) stays responsive even while the
+HTTP fetch is in progress. Two tasks run cooperatively on the single core:
+  - touch_task: polls every 20ms, renders instantly on tap
+  - fetch_task: async HTTP GET, yields at every network read
 """
 
 import time
 import gc
 from machine import Pin, I2C
+import uasyncio as asyncio
 
-# Hardware drivers
 import lib.display as display
 import lib.wifi as wifi
 from lib.touch import Touch
 from lib.rtc_pcf8563 import PCF8563
 import lib.api as api
 import lib.ui as ui
-import lib.battery as battery
 
-# Load config
 try:
     import config
 except ImportError:
     config = None
 
-# Load fonts
 try:
     import vga1_bold_16x32 as _font_lg
 except ImportError:
@@ -43,71 +36,129 @@ try:
 except ImportError:
     _font_sm = None
 
+# ── Shared state (cooperative single-core — no locking needed) ────────────────
+_data   = None
+_screen = 0
 
-def show_status(tft, line1, line2="", show_batt=False):
-    """Show a status message centered on screen."""
+
+def show_status(tft, line1, line2=""):
     display.clear(tft)
     if _font_sm:
         display.center_text(tft, _font_sm, line1, 100, 0xFFFF)
         if line2:
             display.center_text(tft, _font_sm, line2, 120, 0x7BEF)
-        if show_batt:
-            v = battery.voltage()
-            pct = battery.percent()
-            info = "{:.2f}V  {}%".format(v, pct)
-            display.center_text(tft, _font_sm, info, 150, 0x7BEF)
 
 
-def main():
-    # Init display
+def _parse_url(url):
+    """'http://192.168.1.100:8265' → ('192.168.1.100', 8265)"""
+    url = url.replace("http://", "").replace("https://", "").split("/")[0]
+    if ":" in url:
+        host, port_str = url.rsplit(":", 1)
+        return host, int(port_str)
+    return url, 80
+
+
+# ── Tasks ─────────────────────────────────────────────────────────────────────
+
+async def touch_task(touch, tft):
+    """Poll touch every 20ms. Renders immediately on tap.
+
+    Stays fully responsive during HTTP fetch because uasyncio yields
+    at every await — network reads in fetch_task don't block this task.
+    """
+    global _screen
+    last_ms = 0
+    while True:
+        ms = time.ticks_ms()
+        if time.ticks_diff(ms, last_ms) > 400:
+            point = touch.read()
+            if point:
+                last_ms = ms
+                if point[0] < 120:
+                    _screen = (_screen - 1) % ui.NUM_SCREENS
+                else:
+                    _screen = (_screen + 1) % ui.NUM_SCREENS
+                ui.draw_screen(tft, _screen, _data)
+        await asyncio.sleep_ms(20)
+
+
+async def _reconnect(wlan):
+    """Non-blocking WiFi reconnect — uses await so touch stays alive."""
+    if wlan.isconnected():
+        return True
+    try:
+        wlan.active(True)
+        wlan.connect(config.WIFI_SSID, config.WIFI_PASS)
+        for _ in range(20):           # 10s timeout
+            if wlan.isconnected():
+                return True
+            await asyncio.sleep_ms(500)
+    except Exception:
+        pass
+    return False
+
+
+async def fetch_task(host, port, tft, wlan, refresh_s):
+    """Fetch data every refresh_s seconds without blocking touch."""
+    global _data
+    while True:
+        await asyncio.sleep(refresh_s)
+        if not await _reconnect(wlan):
+            continue
+        new_data = await api.fetch_async(host, port)
+        if new_data is not None:
+            _data = new_data
+            ui.draw_screen(tft, _screen, _data)
+        gc.collect()
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+async def amain():
+    global _data
+
     tft = display.init()
     display.clear(tft)
 
-    # Check fonts
     if _font_lg is None or _font_sm is None:
         show_status(tft, "Missing fonts!", "Upload to /fonts/")
         return
 
-    # Set fonts in UI module
     ui.font_lg = _font_lg
     ui.font_sm = _font_sm
 
-    # Check config
     if config is None:
         show_status(tft, "No config.py!", "Copy config_example")
         return
 
     show_status(tft, "Starting...")
 
-    # Init I2C (shared bus for touch + RTC)
     i2c = I2C(0, sda=Pin(6), scl=Pin(7), freq=400_000)
-
-    # Init peripherals
     touch = Touch(i2c, int_pin=20)
     rtc = PCF8563(i2c)
 
-    # Wait for power to stabilize on battery boot
-    time.sleep(2)
+    await asyncio.sleep(2)  # power stabilise on battery boot
 
-    # Connect WiFi (retry forever — critical for battery-only boot)
+    # WiFi — blocking connect is fine at boot, tasks haven't started yet
     wlan = None
     for attempt in range(1, 100):
-        show_status(tft, "WiFi... #{}".format(attempt), config.WIFI_SSID, show_batt=True)
+        show_status(tft, "WiFi... #{}".format(attempt), config.WIFI_SSID)
         try:
             wlan = wifi.connect(config.WIFI_SSID, config.WIFI_PASS)
             break
         except RuntimeError:
-            time.sleep(3)
+            await asyncio.sleep(3)
+
     if wlan is None or not wlan.isconnected():
-        show_status(tft, "WiFi failed!", "Rebooting...", show_batt=True)
-        time.sleep(5)
+        show_status(tft, "WiFi failed!", "Rebooting...")
+        await asyncio.sleep(5)
         import machine
         machine.reset()
-    ip = wifi.ip(wlan)
-    show_status(tft, "Connected", ip or "")
-    time.sleep(1)
 
-    # Sync RTC from NTP
+    show_status(tft, "Connected", wifi.ip(wlan) or "")
+    await asyncio.sleep(1)
+
+    # NTP sync
     try:
         import ntptime
         ntptime.settime()
@@ -116,56 +167,28 @@ def main():
     except Exception:
         pass
 
-    # Initial data fetch
+    # Parse server address once
+    host, port = _parse_url(config.SERVER_URL)
+
+    # Initial fetch
     show_status(tft, "Fetching data...")
-    data = api.fetch(config.SERVER_URL)
+    _data = await api.fetch_async(host, port)
     gc.collect()
 
-    # State
-    screen = 0
-    last_fetch = time.time()
-    last_touch = 0
-    refresh = getattr(config, "REFRESH_INTERVAL", 10)
+    refresh = getattr(config, "REFRESH_INTERVAL", 60)
 
-    # Initial render
-    ui.draw_screen(tft, screen, data)
+    ui.draw_screen(tft, _screen, _data)
 
-    # Main loop — wrapped in try/except so USB disconnect doesn't kill it
+    # Launch tasks — touch runs every 20ms, fetch runs every refresh_s
+    asyncio.create_task(touch_task(touch, tft))
+    asyncio.create_task(fetch_task(host, port, tft, wlan, refresh))
+
+    # Keep the scheduler running
     while True:
-        try:
-            now = time.time()
-
-            # Handle touch (with 400ms debounce)
-            if now - last_touch > 0.4:
-                point = touch.read()
-                if point:
-                    last_touch = now
-                    if point[0] < 120:
-                        screen = (screen - 1) % ui.NUM_SCREENS
-                    else:
-                        screen = (screen + 1) % ui.NUM_SCREENS
-                    ui.draw_screen(tft, screen, data)
-
-            # Periodic data refresh
-            if now - last_fetch >= refresh:
-                try:
-                    wifi.ensure_connected(wlan, config.WIFI_SSID, config.WIFI_PASS)
-                    new_data = api.fetch(config.SERVER_URL)
-                    if new_data is not None:
-                        data = new_data
-                except Exception:
-                    pass
-                last_fetch = now
-                gc.collect()
-                ui.draw_screen(tft, screen, data)
-
-            time.sleep(0.05)
-
-        except KeyboardInterrupt:
-            break
-        except Exception:
-            # Survive any transient errors (USB disconnect, I2C glitch, etc.)
-            time.sleep(1)
+        await asyncio.sleep(60)
 
 
-main()
+try:
+    asyncio.run(amain())
+except KeyboardInterrupt:
+    pass

@@ -9,7 +9,6 @@ Four screens, navigated by touch (tap left=prev, tap right=next):
 
 from micropython import const
 import lib.display as disp
-import lib.battery as battery
 from lib.colors import (
     BG, TEXT, TEXT_DIM, ACCENT, ACCENT_DIM,
     GOOD, WARN, BAD, BAR_FILL, BAR_BG,
@@ -138,7 +137,7 @@ def _draw_dashboard(tft, data):
         "Session",
         "{}%".format(s_pct),
         s_pct,
-        "Resets {}".format(s_reset) if s_reset else "",
+        s_reset,
     )
 
     # Separator
@@ -153,7 +152,7 @@ def _draw_dashboard(tft, data):
         "Weekly",
         "{}%".format(w_pct),
         w_pct,
-        "Resets {}".format(w_reset) if w_reset else "",
+        w_reset,
     )
 
     # Separator
@@ -168,7 +167,7 @@ def _draw_dashboard(tft, data):
         "Sonnet",
         "{}%".format(sn_pct),
         sn_pct,
-        "Resets {}".format(sn_reset) if sn_reset else "",
+        sn_reset,
     )
 
 
@@ -179,47 +178,74 @@ _MONTHS = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
+def _draw_temp_with_degree(tft, font, temp_int, y, color):
+    """Draw e.g. '30°C' centred at y using a hand-drawn degree ring."""
+    ts  = str(temp_int)
+    cw  = font.WIDTH
+    # Layout: digits | 2px | 3px ring | 2px | "C"
+    total_w = len(ts) * cw + 2 + 3 + 2 + cw
+    x = (240 - total_w) // 2
+    tft.text(font, ts, x, y, color)
+    # 3×3 open square = degree ring
+    dx = x + len(ts) * cw + 2
+    dy = y + 2
+    tft.fill_rect(dx, dy, 3, 3, color)
+    tft.pixel(dx + 1, dy + 1, 0x0000)   # hollow centre
+    tft.text(font, "C", dx + 5, y, color)
+
+
 def _draw_clock_screen(tft, data):
-    """Digital clock with date, pulled from relay server's system time."""
+    """UX font hierarchy:
+         TIME  — font_lg, dominant (most important)
+         temp  — font_sm, secondary (smaller than time per priority)
+         city / date / spend — font_sm, supporting
+
+    Two groups (tight within, clear gap between):
+         [icon]  [temp °C]  [city]     ← weather group, y=56-103
+         [12:34]  [date]  [spend]       ← clock group,   y=126-180
+    """
     c = data.get("clock", {})
     if not c:
         disp.center_text(tft, font_sm, "No clock data", 110, TEXT_DIM)
         return
 
-    hour = c.get("hour", 0)
-    minute = c.get("minute", 0)
-    day = c.get("day", 1)
-    month = c.get("month", 1)
-    year = c.get("year", 2026)
-    weekday = c.get("weekday", 0)
+    wx = data.get("weather", {})
+    has_weather = bool(wx and not wx.get("error"))
 
-    # Time — large centered
-    time_str = "{:02d}:{:02d}".format(hour, minute)
-    disp.center_text(tft, font_lg, time_str, 88, TEXT)
+    if has_weather:
+        # ── Weather group (tight: 4 px icon→temp, 0 px temp→city) ────────────
+        disp.draw_weather_icon(tft, 120, 56, wx.get("icon", ""))   # icon centre
 
-    # Date — below time
-    date_str = "{} {} {}, {}".format(
-        _WEEKDAYS[weekday], _MONTHS[month], day, year
-    )
-    disp.center_text(tft, font_sm, date_str, 130, TEXT_DIM)
+        temp = wx.get("temp_c")
+        if temp is not None:
+            _draw_temp_with_degree(tft, font_sm, int(round(temp)), 71, TEXT)
 
-    # Daily cost summary
-    d = data.get("daily", {})
-    d_cost = d.get("cost_usd", 0)
-    if d_cost > 0:
-        disp.center_text(tft, font_sm, "Today: " + _fmt_cost(d_cost), 158, ACCENT)
+        city_short = wx.get("city", "").split(",")[0][:14].strip()
+        if city_short:
+            disp.center_text(tft, font_sm, city_short, 87, TEXT_DIM)
 
-    # Battery + voltage centered
-    pct = battery.percent()
-    volts = battery.voltage()
-    if pct > 60:
-        batt_color = GOOD
-    elif pct > 20:
-        batt_color = WARN
+        # 23 px visual gap → clock group starts at y=126
+        time_y = 126
     else:
-        batt_color = BAD
-    batt_str = "{}%  {:.2f}V".format(pct, volts)
-    disp.center_text(tft, font_sm, batt_str, 190, batt_color)
+        time_y = 98   # clock centred on screen when no weather
+
+    # ── Clock group (tight: 4 px time→date, 2 px date→spend) ────────────────
+    time_str = "{:02d}:{:02d}".format(c.get("hour", 0), c.get("minute", 0))
+    disp.center_text(tft, font_lg, time_str, time_y, TEXT)          # 32 px tall
+
+    date_str = "{} {} {}, {}".format(
+        _WEEKDAYS[c.get("weekday", 0)],
+        _MONTHS[c.get("month", 1)],
+        c.get("day", 1),
+        c.get("year", 2026),
+    )
+    disp.center_text(tft, font_sm, date_str, time_y + 36, TEXT_DIM)  # 32+4
+
+    d_cost = data.get("daily", {}).get("cost_usd", 0)
+    if d_cost > 0:
+        disp.center_text(tft, font_sm, "Today: " + _fmt_cost(d_cost),
+                         time_y + 54, ACCENT)                         # 36+2+16
+
 
 
 # ── Screen 2: Token Breakdown ──
@@ -227,11 +253,19 @@ def _draw_clock_screen(tft, data):
 def _draw_tokens_screen(tft, data):
     s = data.get("session", {})
 
-    disp.center_text(tft, font_sm, "TOKENS", 38, ACCENT)
+    # Weather strip at top
+    wx = data.get("weather", {})
+    if wx and not wx.get("error"):
+        temp = wx.get("temp_c")
+        icon = wx.get("icon", "")
+        temp_str = "{}C  {}".format(int(round(temp)), icon) if temp is not None else icon
+        disp.center_text(tft, font_sm, temp_str, 18, TEXT_DIM)
+
+    disp.center_text(tft, font_sm, "TOKENS", 36, ACCENT)
 
     items = [
-        ("Input", s.get("input_tokens", 0)),
-        ("Output", s.get("output_tokens", 0)),
+        ("Input",   s.get("input_tokens", 0)),
+        ("Output",  s.get("output_tokens", 0)),
         ("Cache W", s.get("cache_write_tokens", 0)),
         ("Cache R", s.get("cache_read_tokens", 0)),
     ]
@@ -240,13 +274,12 @@ def _draw_tokens_screen(tft, data):
     if max_val == 0:
         max_val = 1
 
-    y = 62
+    y = 56
     for label, val in items:
         tft.text(font_sm, label, 30, y, TEXT_DIM)
-        bar_y = y + 16
         frac = val / max_val
         bar_color = ACCENT if val > 0 else 0x2104
-        disp.draw_hbar(tft, 30, bar_y, 120, frac, 6, bar_color)
+        disp.draw_hbar(tft, 30, y + 16, 120, frac, 6, bar_color)
         tft.text(font_sm, _fmt_tokens(val), 160, y, TEXT)
         y += 32
 

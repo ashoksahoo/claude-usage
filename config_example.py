@@ -8,7 +8,7 @@ WIFI_PASS = "your-wifi-password"
 SERVER_URL = "http://192.168.1.100:8265"
 
 # How often to fetch new data (seconds)
-REFRESH_INTERVAL = 10
+REFRESH_INTERVAL = 60
 
 # Display brightness (True = on, False = off for power saving)
 BACKLIGHT = True
