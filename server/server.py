@@ -61,7 +61,23 @@ _use_api: bool = True
 
 
 def get_oauth_credentials() -> dict:
-    """Read Claude Code OAuth credentials from macOS Keychain."""
+    """Read Claude Code OAuth credentials.
+
+    Checks ~/.claude/.credentials.json first (TokenEater v4.3.0 approach),
+    falling back to macOS Keychain only when needed.
+    """
+    # 1. Try credentials file (no password prompt, works on all platforms)
+    creds_file = Path.home() / ".claude" / ".credentials.json"
+    try:
+        if creds_file.exists():
+            creds = json.loads(creds_file.read_text())
+            oauth = creds.get("claudeAiOauth", {})
+            if oauth.get("accessToken"):
+                return oauth
+    except (json.JSONDecodeError, OSError):
+        pass
+
+    # 2. Fall back to macOS Keychain
     try:
         result = subprocess.run(
             ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
