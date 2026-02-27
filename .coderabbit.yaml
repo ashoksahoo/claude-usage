@@ -3,7 +3,7 @@
 language: "en-US"
 
 reviews:
-  profile: "assertive"
+  profile: "chill"
   high_level_summary: true
   request_changes_workflow: false
   auto_review:
@@ -19,34 +19,16 @@ reviews:
   path_instructions:
     - path: "lib/**/*.py"
       instructions: |
-        This is MicroPython code running on an ESP32-C3 with ~100KB free RAM.
-        Flag any: heap allocations in tight loops, string concatenation in loops
-        (prefer list+join), use of CPython-only stdlib modules not available in
-        MicroPython (e.g. threading, multiprocessing, pathlib, dataclasses),
-        blocking I/O that should use uasyncio instead, missing gc.collect()
-        around large allocations. Constants should use micropython.const().
-
-    - path: "main.py"
-      instructions: |
-        MicroPython entry point using uasyncio cooperative multitasking.
-        Two tasks: touch_task (20ms poll) and fetch_task (60s HTTP fetch).
-        Flag any blocking calls (time.sleep, synchronous I/O) that would
-        stall the touch task, or any missing await in async functions.
+        MicroPython on ESP32-C3 (~100KB free RAM). Point out obvious memory
+        issues (e.g. string concat in a loop) or use of CPython-only modules
+        not available in MicroPython. Keep suggestions friendly — this is a
+        hobby project, not production code.
 
     - path: "server/**/*.py"
       instructions: |
-        CPython 3.10+ relay server — zero external dependencies by design
-        (stdlib only: urllib.request, json, http.server, ssl, subprocess).
-        Flag any new third-party imports. Flag thread-safety issues since
-        HTTPServer uses threading. Flag hardcoded secrets or credentials.
-        Flag slow operations on the request handler path that should be cached.
-
-    - path: "server/weather.py"
-      instructions: |
-        Weather module using Open-Meteo (free, no key) + ip-api.com GeoIP.
-        In-memory cache with 2-hour TTL. Flag any network calls outside the
-        cache path, missing timeout parameters, or SSL verification being
-        disabled. WMO codes must map to 3-char ASCII icons for bitmap fonts.
+        Simple relay server, stdlib-only by design. Mention if a new
+        third-party import sneaks in, or if credentials could accidentally
+        get hardcoded. Otherwise keep feedback light.
 
 chat:
   auto_reply: true
